@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peripheral Drift — 900-frame loop</title>
+<style>
+  /* Warm off-black surround so the illusion extends past the canvas edge */
+  html, body { margin: 0; height: 100%; background: #0E0B0C; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+</head>
+<body>
+<script>
+/* ==========================================================================
+   PERIPHERAL DRIFT — seamlessly looping generative artwork
+   Loop: 900 frames @ 60fps (15 s). draw() is a pure function of frameCount.
+   Variants: 1 = radial rings, 2 = hexagonal lattice, 3 = square grid.
+   Space = pause (noLoop stops frameCount, so purity is preserved).
+   ========================================================================== */
+
+// ---- Palette (only these four colours; no strokes, no glow, no blur) ------
+const BLACK = '#0E0B0C';  // darkest  — luminance floor
+const DARK  = '#2C6E7F';  // dark     — teal, mid-low luminance
+const WHITE = '#F2EBDD';  // lightest — luminance ceiling
+const LIGHT = '#C4452F';  // light    — red, mid-high luminance
+
+/* ILLUSION PRINCIPLE — Fraser–Wilcox asymmetric luminance ramp:
+   the four bands are always read black -> dark -> white -> light -> (black)
+   in one rotational direction. The luminance staircase is sawtooth-shaped,
+   NOT symmetric; peripheral retina + fixational eye movements interpret the
+   asymmetric contrast steps as motion from dark toward light. */
+const RAMP_CW  = [BLACK, DARK, WHITE, LIGHT];            // read clockwise
+/* Reversed rotational reading order (same start band) => illusory motion
+   flips direction. Alternating this between rings makes adjacent rings
+   appear to COUNTER-ROTATE (as in Kitaoka's "Rotating Snakes"). */
+const RAMP_CCW = [BLACK, LIGHT, WHITE, DARK];
+
+// ---- Layout constants ------------------------------------------------------
+const DESIGN   = 1000;   // internal design-space size (canvas scales to fit)
+const RING_STEP = 40;    // r_n = 40 * n
+const N_RINGS  = 12;     // n = 1..12
+const TILE_D   = 26;     // tile diameter ~26 px, constant across rings
+const SPACING  = 30;     // centre-to-centre spacing along ring / lattice
+const LOOP     = 900;    // total loop frames
+
+// ---- State -----------------------------------------------------------------
+let variant = 1;         // 1 radial, 2 hex, 3 square
+let paused  = false;
+let tiles   = { 1: [], 2: [], 3: [] };  // precomputed in setup()
+
+function setup() {
+  const s = Math.min(windowWidth, windowHeight);
+  createCanvas(s, s);
+  noStroke();
+  randomSeed(1337);      // DETERMINISM: all randomness seeded once, here only
+
+  buildRadial();
+  buildHex();
+  buildSquare();
+}
+
+/* ---- Variant 1: concentric radial rings -----------------------------------
+   Tile count per ring proportional to circumference so tile size stays
+   constant; every tile rotated to face the centre. */
+function buildRadial() {
+  for (let n = 1; n <= N_RINGS; n++) {
+    const r     = RING_STEP * n;
+    const count = Math.round((TWO_PI * r) / SPACING); // even distribution
+    for (let k = 0; k < count; k++) {
+      const theta = (TWO_PI * k) / count;
+      tiles[1].push({ ring: n, r: r, theta: theta });
+    }
+  }
+}
+
+/* ---- Variant 2: hexagonal lattice -----------------------------------------
+   Same illusion mechanic; "ring" = hex distance from centre, which drives
+   both the counter-rotation parity and the travelling wave phase. */
+function buildHex() {
+  const maxR = RING_STEP * N_RINGS + TILE_D / 2;
+  const colW = SPACING;               // horizontal spacing
+  const rowH = SPACING * 0.8660254;   // sqrt(3)/2 — hex row height
+  const range = Math.ceil(maxR / (SPACING * 0.5));
+  for (let q = -range; q <= range; q++) {
+    for (let rr = -range; rr <= range; rr++) {
+      const x = colW * (q + rr / 2);
+      const y = rowH * rr;
+      if (Math.hypot(x, y) > maxR || (q === 0 && rr === 0)) continue;
+      // hex (axial) ring index, remapped to ~12 bands like the radial rings
+      const hexDist = (Math.abs(q) + Math.abs(rr) + Math.abs(q + rr)) / 2;
+      const ring = 1 + (hexDist % N_RINGS);
+      tiles[2].push({ ring: ring, x: x, y: y, face: Math.atan2(y, x) });
+    }
+  }
+}
+
+/* ---- Variant 3: square grid -----------------------------------------------
+   "Ring" = Chebyshev distance (concentric squares), same mechanic. */
+function buildSquare() {
+  const maxR  = RING_STEP * N_RINGS + TILE_D / 2;
+  const range = Math.ceil(maxR / SPACING);
+  for (let i = -range; i <= range; i++) {
+    for (let j = -range; j <= range; j++) {
+      const x = i * SPACING, y = j * SPACING;
+      if (Math.hypot(x, y) > maxR || (i === 0 && j === 0)) continue;
+      const ring = 1 + (Math.max(Math.abs(i), Math.abs(j)) % N_RINGS);
+      tiles[3].push({ ring: ring, x: x, y: y, face: Math.atan2(y, x) });
+    }
+  }
+}
+
+/* ---- One tile: 4 rotational pie-bands -------------------------------------
+   The bands wrap AROUND the tile in a fixed rotational order — this is the
+   micro-gradient unit of the Fraser–Wilcox illusion. `face` orients the
+   ramp toward the centre so the illusory motion reads tangentially,
+   i.e. as apparent ring rotation. */
+function drawTile(x, y, face, ramp) {
+  push();
+  translate(x, y);
+  rotate(face);
+  for (let i = 0; i < 4; i++) {
+    fill(ramp[i]);
+    arc(0, 0, TILE_D, TILE_D, i * HALF_PI, (i + 1) * HALF_PI);
+  }
+  pop();
+}
+
+function draw() {
+  /* SEAMLESS LOOP: t in [0,1); every animated quantity below is
+     sin/cos(TWO_PI * t * INTEGER), so frame 900 === frame 0 exactly.
+     No easing, no random() — draw() is a pure function of frameCount. */
+  const fc = frameCount % LOOP;
+  const t  = fc / LOOP;
+
+  background(BLACK);
+  translate(width / 2, height / 2);
+
+  /* ILLUSION PRINCIPLE — near-static baseline: peripheral drift is strongest
+     when real motion is barely perceptible, so amplitudes are tiny.
+     Breathing: global scale oscillates 0.97..1.03 (harmonic 1). */
+  const breath = 1 + 0.03 * Math.sin(TWO_PI * t);
+  scale((width / DESIGN) * breath);
+
+  for (const tile of tiles[variant]) {
+    const n = tile.ring;
+
+    /* Travelling wave moving outward: ring n rotates by amplitude 0.06 rad
+       (harmonic 1), phase-offset by n * PI/6. */
+    const wave = 0.06 * Math.sin(TWO_PI * t + n * PI / 6);
+
+    /* Counter-rotation parity: reverse the rotational reading order of the
+       luminance ramp on alternate rings. */
+    const ramp = (n % 2 === 0) ? RAMP_CW : RAMP_CCW;
+
+    if (variant === 1) {
+      // Radial: the wave rotates the whole ring; tiles keep facing centre.
+      const theta = tile.theta + wave;
+      const x = tile.r * Math.cos(theta);
+      const y = tile.r * Math.sin(theta);
+      drawTile(x, y, theta, ramp);
+    } else {
+      // Hex / square: lattice positions are fixed; the wave gently rocks
+      // each tile's orientation instead, phase-offset by ring band.
+      drawTile(tile.x, tile.y, tile.face + wave, ramp);
+    }
+  }
+}
+
+// ---- Controls --------------------------------------------------------------
+function keyPressed() {
+  if (key === '1') variant = 1;
+  if (key === '2') variant = 2;
+  if (key === '3') variant = 3;
+  if (key === ' ') {
+    paused = !paused;
+    // noLoop() freezes frameCount itself, so pausing never breaks the
+    // "pure function of frameCount" contract or the 900-frame loop.
+    paused ? noLoop() : loop();
+    return false; // prevent page scroll on space
+  }
+}
+
+function windowResized() {
+  const s = Math.min(windowWidth, windowHeight);
+  resizeCanvas(s, s);
+}
+</script>
+</body>
+</html>
