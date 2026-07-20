@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chromatic Wave Lines</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; }
+  canvas { display: block; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+</head>
+<body>
+<script>
+/* ==========================================================================
+   CHROMATIC WAVE LINES — recreation of the reference image as a live shader.
+
+   How the reference is constructed (reverse-engineered):
+   1. A field of thin horizontal stripes, small constant pitch (~8 px).
+   2. The stripe phase is displaced by a large, smooth 2-D wave field
+      (domain warping) -> the flowing bulges and pinches.
+   3. THREE copies of that stripe field are printed like process inks —
+      magenta, cyan, yellow — multiplied onto white paper. Each copy is
+      offset a couple of px and warped slightly differently, so the plates
+      "misregister": overlaps make violet (M*C), pink-orange (M*Y), green
+      (C*Y); clean white where no ink lands. That misregistration is the
+      whole chromatic-fringe look.
+
+   Controls:  Space pause · S save frame · mouse X warp depth · mouse Y pitch
+   ========================================================================== */
+
+const VERT = `
+precision highp float;
+attribute vec3 aPosition;
+void main() {
+  vec4 pos = vec4(aPosition, 1.0);
+  pos.xy = pos.xy * 2.0 - 1.0;
+  gl_Position = pos;
+}`;
+
+const FRAG = `
+precision highp float;
+
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform float u_warpDepth;   // mouse X: 0.4 .. 1.6 (1.0 matches reference)
+uniform float u_pitch;       // mouse Y: 5 .. 14 px  (8 matches reference)
+uniform float u_scale;       // design-space zoom: 1 on screen, >1 for print
+uniform vec2  u_offset;      // tile origin offset (for tiled giga-renders)
+
+/* Smooth low-frequency displacement field. Three incommensurate sinusoid
+   products give the blobby, column-like bulges of the reference; because the
+   field varies with y as well as x, its vertical derivative locally
+   compresses / dilates the stripe spacing exactly like the dense ripple
+   pockets in the reference image. */
+float warp(vec2 p, float t) {
+  float w = 0.0;
+  w += 55.0 * sin(p.x * 0.011 + t * 0.31)        * sin(p.y * 0.006 - t * 0.23);
+  w += 30.0 * sin(p.x * 0.021 - t * 0.17 + 1.7)  * cos(p.y * 0.012 + t * 0.29);
+  w += 12.0 * sin(p.x * 0.005 + p.y * 0.004 + t * 0.41);
+  return w;
+}
+
+/* One ink plate: coverage of the warped stripe field at this pixel.
+   'off'  = vertical plate misregistration (px)
+   'gain' = per-plate warp multiplier — plates diverge most where the warp is
+            strongest, which is where the reference shows the widest fringes. */
+float plate(vec2 p, float off, float gain, float t) {
+  float phase = (p.y + warp(p, t) * u_warpDepth * gain + off) / u_pitch;
+  float d = abs(fract(phase) - 0.5);      // distance from stripe centre, 0..0.5
+  // ~50% duty cycle, soft half-pixel edge: matches the airbrushed AA of the PNG
+  return smoothstep(0.27, 0.27 - 0.06, d);
+}
+
+void main() {
+  /* Design-space coordinates: the whole composition (pitch, warp amplitudes)
+     is defined in on-screen pixels. Dividing by u_scale means a 4x-resolution
+     export reproduces the SAME composition with 4x the pixel fidelity,
+     rather than 4x as many stripes. u_offset shifts the window for tiling. */
+  vec2 p = (gl_FragCoord.xy + u_offset) / u_scale;
+  float t = u_time;
+
+  /* Process-ink colours sampled from the reference:
+     M*C -> the dominant violet, M*Y -> pink/salmon, C*Y -> the sparse green. */
+  const vec3 MAGENTA = vec3(1.00, 0.45, 0.93);
+  const vec3 CYAN    = vec3(0.42, 0.80, 1.00);
+  const vec3 YELLOW  = vec3(0.95, 0.95, 0.33);
+
+  /* Multiplicative (subtractive) compositing on white paper —
+     each plate absorbs light where its stripes land. */
+  vec3 col = vec3(1.0);
+  col *= mix(vec3(1.0), MAGENTA, plate(p, -1.4, 1.000, t));
+  col *= mix(vec3(1.0), CYAN,    plate(p,  0.0, 1.018, t));
+  col *= mix(vec3(1.0), YELLOW,  plate(p,  1.9, 1.040, t));
+
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+let sh;
+let paused = false;
+let warpDepth = 1.0;   // reference-matching defaults until mouse moves
+let pitch = 8.0;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight, WEBGL);
+  pixelDensity(1);
+  noSmooth();
+  sh = createShader(VERT, FRAG);
+}
+
+function draw() {
+  shader(sh);
+  sh.setUniform('u_time', (millis() / 1000) % 3600);
+  sh.setUniform('u_resolution', [width, height]);
+  sh.setUniform('u_warpDepth', warpDepth);
+  sh.setUniform('u_pitch', pitch);
+  sh.setUniform('u_scale', 1.0);
+  sh.setUniform('u_offset', [0.0, 0.0]);
+  rect(0, 0, width, height);
+}
+
+/* ---- PRINT EXPORT (press P) -----------------------------------------------
+   Renders the CURRENT on-screen composition at print resolution into an
+   offscreen WEBGL buffer and saves a PNG. Edit these two numbers for your
+   target: pixels = inches * DPI. Defaults: A2 landscape @ 300 DPI.
+     A3 300dpi: 4961 x 3508      A2 300dpi: 7016 x 4961
+     A1 300dpi: 9933 x 7016      (A0/large: use tiled export, see notes) */
+const PRINT_W = 7016;
+const PRINT_H = 4961;
+const PRINT_DPI = 300;
+
+/* Browsers hard-code 96 DPI into canvas PNGs, so we patch the file ourselves:
+   a PNG stores physical density in a 'pHYs' chunk (pixels-per-METRE + unit
+   flag). We splice one in right after the IHDR header — byte 33 is always the
+   insertion point, since the PNG signature is 8 bytes and IHDR is fixed-size.
+   Only metadata changes; pixel data is untouched. */
+function crc32(bytes) {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) {
+    crc ^= bytes[i];
+    for (let k = 0; k < 8; k++) crc = (crc & 1) ? (crc >>> 1) ^ 0xEDB88320 : crc >>> 1;
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+function savePngWithDpi(canvas, filename, dpi) {
+  canvas.toBlob(async (blob) => {
+    const src = new Uint8Array(await blob.arrayBuffer());
+    const ppm = Math.round(dpi / 0.0254);          // 300 DPI -> 11811 px/metre
+
+    // Build the 21-byte pHYs chunk: len(4) + type(4) + data(9) + crc(4)
+    const chunk = new Uint8Array(21);
+    const dv = new DataView(chunk.buffer);
+    dv.setUint32(0, 9);                             // data length
+    chunk.set([0x70, 0x48, 0x59, 0x73], 4);         // 'pHYs'
+    dv.setUint32(8, ppm);                           // x pixels per metre
+    dv.setUint32(12, ppm);                          // y pixels per metre
+    chunk[16] = 1;                                  // unit: metre
+    dv.setUint32(17, crc32(chunk.subarray(4, 17))); // CRC over type+data
+
+    const INSERT = 33;                              // 8 sig + 25 IHDR chunk
+    const out = new Uint8Array(src.length + 21);
+    out.set(src.subarray(0, INSERT), 0);
+    out.set(chunk, INSERT);
+    out.set(src.subarray(INSERT), INSERT + 21);
+
+    const url = URL.createObjectURL(new Blob([out], { type: 'image/png' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, 'image/png');
+}
+
+function exportPrint() {
+  const frozenT = (millis() / 1000) % 3600;        // freeze the visible moment
+  const s = PRINT_W / width;                       // design-space -> print zoom
+  const pg = createGraphics(PRINT_W, PRINT_H, WEBGL);
+  pg.pixelDensity(1);
+  pg.noSmooth();
+  const psh = pg.createShader(VERT, FRAG);         // shader on pg's GL context
+  pg.shader(psh);
+  psh.setUniform('u_time', frozenT);
+  psh.setUniform('u_resolution', [PRINT_W, PRINT_H]);
+  psh.setUniform('u_warpDepth', warpDepth);
+  psh.setUniform('u_pitch', pitch);
+  psh.setUniform('u_scale', s);
+  psh.setUniform('u_offset', [0.0, 0.0]);
+  pg.rect(0, 0, PRINT_W, PRINT_H);
+  savePngWithDpi(pg.elt, `chromatic-waves-${PRINT_W}x${PRINT_H}-${PRINT_DPI}dpi.png`, PRINT_DPI);
+  setTimeout(() => pg.remove(), 4000);             // free memory after encode
+}
+
+function mouseMoved() {
+  warpDepth = constrain(map(mouseX, 0, width, 0.4, 1.6), 0.4, 1.6);
+  pitch     = constrain(map(mouseY, 0, height, 5.0, 14.0), 5.0, 14.0);
+}
+
+function keyPressed() {
+  if (key === ' ') { paused = !paused; paused ? noLoop() : loop(); return false; }
+  if (key === 's' || key === 'S') saveCanvas('chromatic-waves', 'png');
+  if (key === 'p' || key === 'P') exportPrint();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+</script>
+</body>
+</html>
