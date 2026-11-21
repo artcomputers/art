@@ -1,9 +1,9 @@
 ArtComputers + ArtParsa
-Sacred Geometry + Fractals + Moire art
-Blender, Omnigeometry, Krita, p5.js
-Internet Archive, Reddit, Artstation, GitHub, Instagram, iCloud, Onedrive
-Salviadroid, Zak Korvin, Kamal ol molk, Pouyan Khosravi, Rob Gonsalves
-Claude.ai, Google AI Studio and Nano Banana Pro
+Sacred Geometry + Fractals + Moire + Optical Illusion Art
+Creative apps: Blender, Omnigeometry, Illustrator, Adobe Creative Cloud, p5.js
+Good sites: Internet Archive, Reddit, Artstation, GitHub, Instagram, iCloud, Onedrive
+Favourite Artists: Salviadroid, Zak Korvin, Kamal ol molk, Pouyan Khosravi, Rob Gonsalves
+Useful AI models: Claude.ai, Google AI Studio and Nano Banana Pro
 -
 https://archive.org/details/artparsa
 https://www.artstation.com/artparsa
